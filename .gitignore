@@ -1,0 +1,10 @@
+.env
+.venv/
+.pytest_cache/
+.pytest_tmp/
+__pycache__
+*.pyc
+data/*.csv
+data/*.json
+data/*.db
+.DS_Store
