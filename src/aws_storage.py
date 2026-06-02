@@ -1,20 +1,20 @@
-﻿"""Handle AWS S3 operations for pipeline outputs.
+"""Handle local artifact storage for pipeline outputs.
 
-This module manages uploading, downloading, listing, and connection checks
-for the pipeline's S3 storage layer.
+Replaces AWS S3 with a free local export system.
+Pipeline outputs are copied to an 'exports/' folder inside the project,
+making it easy to inspect, share, or archive results without any cloud account.
 """
 
 from __future__ import annotations
 
-import os
+import shutil
 from pathlib import Path
-
-import boto3
-import dotenv
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = PROJECT_ROOT / "data"
+EXPORTS_DIR = PROJECT_ROOT / "exports"
+
 PIPELINE_OUTPUT_FILES = [
     DATA_DIR / "validated_annotations.csv",
     DATA_DIR / "validation_errors.csv",
@@ -28,181 +28,75 @@ PIPELINE_OUTPUT_FILES = [
 
 
 
-def load_aws_config() -> dict[str, str]:
-    """Load AWS credentials and bucket configuration from the .env file."""
+def export_file(source_path: Path, destination_dir: Path) -> bool:
+    """Copy a pipeline output file to the exports directory."""
 
-    dotenv.load_dotenv(PROJECT_ROOT / ".env")
-    return {
-        "aws_access_key_id": os.getenv("AWS_ACCESS_KEY_ID", "").strip(),
-        "aws_secret_access_key": os.getenv("AWS_SECRET_ACCESS_KEY", "").strip(),
-        "aws_bucket_name": os.getenv("AWS_BUCKET_NAME", "").strip(),
-        "aws_region": os.getenv("AWS_REGION", "").strip(),
-    }
-
-
-
-def initialize_s3_client() -> tuple[object | None, str]:
-    """Initialize and return a boto3 S3 client plus the configured bucket name."""
-
-    config = load_aws_config()
-    bucket_name = config["aws_bucket_name"]
-    required_values = [
-        config["aws_access_key_id"],
-        config["aws_secret_access_key"],
-        bucket_name,
-        config["aws_region"],
-    ]
-    if any(not value for value in required_values):
-        print("AWS configuration is incomplete. Check the .env file values.")
-        return None, bucket_name
-
-    try:
-        s3_client = boto3.client(
-            "s3",
-            aws_access_key_id=config["aws_access_key_id"],
-            aws_secret_access_key=config["aws_secret_access_key"],
-            region_name=config["aws_region"],
-        )
-        return s3_client, bucket_name
-    except Exception as exc:
-        print(f"Failed to initialize S3 client: {exc}")
-        return None, bucket_name
-
-
-
-def upload_file(local_path: str | Path, s3_key: str) -> bool:
-    """Upload a local file to S3 and report whether the upload succeeded."""
-
-    s3_client, bucket_name = initialize_s3_client()
-    local_path = Path(local_path)
-    if s3_client is None:
+    if not source_path.exists():
+        print(f"Skipped (not found): {source_path.name}")
         return False
-    if not local_path.exists():
-        print(f"Upload failed: local file not found: {local_path}")
-        return False
-
-    try:
-        s3_client.upload_file(str(local_path), bucket_name, s3_key)
-        print(f"Uploaded {local_path} → s3://{bucket_name}/{s3_key}")
-        return True
-    except Exception as exc:
-        print(f"Upload failed for {local_path}: {exc}")
-        return False
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    dest_path = destination_dir / source_path.name
+    shutil.copy2(source_path, dest_path)
+    print(f"Exported: {source_path.name} → {dest_path}")
+    return True
 
 
 
-def download_file(s3_key: str, local_path: str | Path) -> bool:
-    """Download a file from S3 to a local path and report the result."""
-
-    s3_client, bucket_name = initialize_s3_client()
-    local_path = Path(local_path)
-    if s3_client is None:
-        return False
-
-    try:
-        local_path.parent.mkdir(parents=True, exist_ok=True)
-        s3_client.download_file(bucket_name, s3_key, str(local_path))
-        print(f"Downloaded s3://{bucket_name}/{s3_key} → {local_path}")
-        return True
-    except Exception as exc:
-        print(f"Download failed for s3://{bucket_name}/{s3_key}: {exc}")
-        return False
-
-
-
-def upload_pipeline_outputs() -> dict[str, str]:
-    """Upload all available pipeline output files to the pipeline_outputs/ S3 folder."""
+def export_pipeline_outputs() -> dict[str, str]:
+    """Copy all available pipeline output files to the exports/ folder."""
 
     results: dict[str, str] = {}
     for local_path in PIPELINE_OUTPUT_FILES:
-        filename = local_path.name
-        if not local_path.exists():
-            print(f"Skipped {local_path}: file does not exist")
-            results[filename] = "failed"
-            continue
-
-        s3_key = f"pipeline_outputs/{filename}"
-        success = upload_file(local_path, s3_key)
-        status = "success" if success else "failed"
-        print(f"{filename}: {status}")
-        results[filename] = status
+        success = export_file(local_path, EXPORTS_DIR)
+        results[local_path.name] = "success" if success else "skipped"
     return results
 
 
 
-def list_pipeline_outputs() -> list[dict[str, object]]:
-    """List all files under pipeline_outputs/ in S3 and print a formatted table."""
+def list_exports() -> list[dict[str, object]]:
+    """List all files currently in the exports/ folder."""
 
-    s3_client, bucket_name = initialize_s3_client()
-    if s3_client is None:
+    if not EXPORTS_DIR.exists():
+        print("No exports folder found. Run the pipeline first.")
         return []
 
-    try:
-        response = s3_client.list_objects_v2(Bucket=bucket_name, Prefix="pipeline_outputs/")
-        contents = response.get("Contents", [])
-        results = [
-            {
-                "key": item["Key"],
-                "size_kb": round(item["Size"] / 1024, 2),
-                "last_modified": item["LastModified"].isoformat(),
-            }
-            for item in contents
-            if item["Key"] != "pipeline_outputs/"
-        ]
-
-        if not results:
-            print("No pipeline outputs found in S3.")
-            return []
-
-        key_width = max(len("key"), max(len(str(item["key"])) for item in results))
-        size_width = max(len("size_kb"), max(len(f"{item['size_kb']:.2f}") for item in results))
-        last_modified_width = max(
-            len("last_modified"),
-            max(len(str(item["last_modified"])) for item in results),
-        )
-        header = (
-            f"{'key'.ljust(key_width)}  "
-            f"{'size_kb'.ljust(size_width)}  "
-            f"{'last_modified'.ljust(last_modified_width)}"
-        )
-        print(header)
-        print("-" * len(header))
-        for item in results:
-            print(
-                f"{str(item['key']).ljust(key_width)}  "
-                f"{item['size_kb']:.2f}".ljust(size_width + 2)
-                + f"  {str(item['last_modified']).ljust(last_modified_width)}"
-            )
-        return results
-    except Exception as exc:
-        print(f"Failed to list pipeline outputs: {exc}")
+    items = sorted(EXPORTS_DIR.iterdir())
+    if not items:
+        print("Exports folder is empty.")
         return []
 
+    results = []
+    print(f"\n{'File':<40} {'Size (KB)':>10}")
+    print("-" * 52)
+    for item in items:
+        if item.is_file():
+            size_kb = round(item.stat().st_size / 1024, 2)
+            print(f"{item.name:<40} {size_kb:>10.2f}")
+            results.append({"name": item.name, "size_kb": size_kb, "path": str(item)})
+    return results
 
 
-def check_bucket_connection() -> bool:
-    """Verify that the configured AWS bucket can be listed with the current credentials."""
 
-    s3_client, bucket_name = initialize_s3_client()
-    if s3_client is None:
-        return False
+def check_exports_ready() -> bool:
+    """Verify that the exports directory exists and contains files."""
 
-    try:
-        s3_client.list_objects_v2(Bucket=bucket_name, MaxKeys=1)
-        print("AWS connection successful")
+    if EXPORTS_DIR.exists() and any(EXPORTS_DIR.iterdir()):
+        print(f"Exports ready at: {EXPORTS_DIR}")
         return True
-    except Exception as exc:
-        print(f"AWS connection failed: {exc}")
-        return False
+    print("Exports directory is empty or does not exist.")
+    return False
 
 
 
 def main() -> None:
-    """Check AWS connectivity, upload available outputs, and list remote results."""
+    """Export all available pipeline outputs to the local exports/ folder."""
 
-    if check_bucket_connection():
-        upload_pipeline_outputs()
-        list_pipeline_outputs()
+    print(f"Exporting pipeline outputs to: {EXPORTS_DIR}")
+    results = export_pipeline_outputs()
+    success_count = sum(1 for s in results.values() if s == "success")
+    skip_count = sum(1 for s in results.values() if s == "skipped")
+    print(f"\nExport complete: {success_count} exported, {skip_count} skipped.")
+    list_exports()
 
 
 if __name__ == "__main__":
