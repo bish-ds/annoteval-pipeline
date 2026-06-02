@@ -1,8 +1,7 @@
 pandas
 numpy
 scikit-learn
-openai
-boto3
+google-generativeai
 streamlit
 python-dotenv
 pytest
