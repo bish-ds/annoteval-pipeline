@@ -1,4 +1,4 @@
-# AnnotEval — QA Annotation Quality & LLM Evaluation Pipeline
+# AnnotEval : QA Annotation Quality & LLM Evaluation Pipeline
 
 > A production-grade pipeline for measuring inter-annotator agreement, validating annotation schemas, and benchmarking LLM output quality on question-answering datasets using an LLM-as-judge evaluation framework.
 >
