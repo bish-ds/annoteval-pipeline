@@ -1,12 +1,14 @@
 # AnnotEval — QA Annotation Quality & LLM Evaluation Pipeline
 
 > A production-grade pipeline for measuring inter-annotator agreement, validating annotation schemas, and benchmarking LLM output quality on question-answering datasets using an LLM-as-judge evaluation framework.
+>
+> **100% free to run** — uses the Google Gemini API (free tier) and local file storage. No credit card required.
 
 ---
 
 ## Overview
 
-AnnotEval is an end-to-end data quality system built for teams working with human-annotated QA datasets and LLM-generated outputs. It automates the full evaluation lifecycle — from synthetic data generation and schema validation through inter-annotator agreement analysis and GPT-4o-mini-powered answer scoring — and surfaces results via a Streamlit monitoring dashboard backed by SQLite and AWS S3.
+AnnotEval is an end-to-end data quality system built for teams working with human-annotated QA datasets and LLM-generated outputs. It automates the full evaluation lifecycle — from synthetic data generation and schema validation through inter-annotator agreement analysis and Gemini-powered answer scoring — and surfaces results via a Streamlit monitoring dashboard backed by SQLite.
 
 This project addresses a real and growing problem in ML pipelines: **how do you systematically measure and improve the quality of both human annotations and LLM-generated answers at scale?**
 
@@ -25,8 +27,8 @@ raw_qa.csv ──► annotation_pipeline ──► agreement_metrics ──► l
                                                                      │
                                             ┌────────────────────────┘
                                             ▼
-                                     SQLite Logger ◄──── AWS S3 Storage
-                                            │
+                                     SQLite Logger ◄──── Local Exports
+                                            │              (exports/)
                                             ▼
                                    Streamlit Dashboard
 ```
@@ -42,8 +44,8 @@ raw_qa.csv ──► annotation_pipeline ──► agreement_metrics ──► l
 | **Conflict Metrics** | Per-question majority voting, Shannon entropy, and conflict scoring; flags questions where no label has a majority |
 | **Inter-Annotator Agreement** | Fleiss Kappa (multi-annotator), pairwise Cohen's Kappa for all 10 annotator pairs, and percent-agreement matrix |
 | **Annotator Outlier Detection** | Flags annotators whose error rate exceeds mean + 1.5σ of the group |
-| **LLM-as-Judge Evaluation** | GPT-4o-mini generates answers then scores them on faithfulness, relevance, and completeness (1–5 scale) with structured JSON output |
-| **AWS S3 Integration** | Uploads all pipeline artifacts to a configurable S3 bucket under `pipeline_outputs/` |
+| **LLM-as-Judge Evaluation** | Gemini 1.5 Flash generates answers then scores them on faithfulness, relevance, and completeness (1–5 scale) with structured JSON output |
+| **Local Artifact Export** | Copies all pipeline outputs to an `exports/` folder — no cloud account needed |
 | **SQLite Run Logging** | Persists run-level statistics (kappa scores, conflict rates, avg LLM scores) and annotator stats across pipeline executions |
 | **Streamlit Dashboard** | Interactive dashboard for inspecting agreement metrics, LLM judge scores, and dataset quality summaries |
 
@@ -54,8 +56,7 @@ raw_qa.csv ──► annotation_pipeline ──► agreement_metrics ──► l
 - **Language:** Python 3.10+
 - **Data:** Pandas, NumPy
 - **ML / Stats:** Scikit-learn (`cohen_kappa_score`), custom Fleiss Kappa implementation
-- **LLM:** OpenAI API (`gpt-4o-mini`) — generation + LLM-as-judge scoring
-- **Cloud:** AWS S3 via `boto3`
+- **LLM:** Google Gemini API — `gemini-1.5-flash` (free tier) — generation + LLM-as-judge scoring
 - **Persistence:** SQLite via Python `sqlite3`
 - **Dashboard:** Streamlit
 - **Testing:** Pytest
@@ -71,24 +72,34 @@ annoteval-pipeline/
 │   ├── generate_data.py        # Synthetic QA + annotation dataset generation
 │   ├── annotation_pipeline.py  # Schema validation, conflict metrics, annotator stats
 │   ├── agreement_metrics.py    # Fleiss Kappa, Cohen's Kappa, percent agreement
-│   ├── llm_evaluator.py        # GPT-4o-mini answer generation + LLM-as-judge scoring
-│   ├── aws_storage.py          # S3 upload / download / listing
+│   ├── llm_evaluator.py        # Gemini answer generation + LLM-as-judge scoring
+│   ├── aws_storage.py          # Local artifact export to exports/ folder
 │   └── db.py                   # SQLite schema init, run logging, annotator stat logging
 ├── dashboard/                  # Streamlit app
 ├── tests/                      # Pytest test suite
 ├── docs/
 │   └── runbook.md              # Operational runbook
 ├── data/                       # Generated artifacts (gitignored)
+├── exports/                    # Local pipeline output copies (gitignored)
 ├── run_pipeline.py             # Single-command full pipeline runner
 ├── requirements.txt
-└── .env                        # API keys and AWS credentials (not committed)
+└── .env                        # API key (not committed)
 ```
 
 ---
 
-## Setup
+## Setup (Free — No Credit Card Needed)
 
-### 1. Clone and install dependencies
+### 1. Get a free Gemini API key
+
+1. Go to [aistudio.google.com](https://aistudio.google.com)
+2. Sign in with any Google account
+3. Click **"Get API Key"** → **"Create API key"**
+4. Copy the key — it's free with no billing required
+
+Free limits: **1,500 requests/day**, **1M tokens/minute** on `gemini-1.5-flash` — more than enough.
+
+### 2. Clone and install dependencies
 
 ```bash
 git clone https://github.com/bish-ds/annoteval-pipeline.git
@@ -99,19 +110,15 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-### 2. Configure environment variables
+### 3. Configure environment variables
 
 Create a `.env` file in the project root:
 
 ```env
-OPENAI_API_KEY=your_openai_api_key_here
-AWS_ACCESS_KEY_ID=your_aws_access_key_id
-AWS_SECRET_ACCESS_KEY=your_aws_secret_access_key
-AWS_BUCKET_NAME=your_s3_bucket_name
-AWS_REGION=us-east-1
+GEMINI_API_KEY=your_gemini_api_key_here
 ```
 
-> **Note:** The pipeline runs fully without AWS credentials. S3 upload steps are skipped gracefully if credentials are absent.
+That's it — no AWS credentials or OpenAI billing needed.
 
 ---
 
@@ -131,7 +138,7 @@ This executes all 6 steps in order:
 | 2 | `annotation_pipeline` | `data/validated_annotations.csv`, `data/validation_errors.csv`, `data/annotator_stats.csv` |
 | 3 | `agreement_metrics` | `data/cohen_kappa_scores.csv`, `data/percent_agreement.csv`, `data/agreement_summary.json`, `data/contested_questions.csv` |
 | 4 | `llm_evaluator` | `data/llm_eval_scores.csv` |
-| 5 | `aws_storage` | Uploads all artifacts to S3 |
+| 5 | `aws_storage` | Copies all artifacts to `exports/` folder locally |
 | 6 | `db` | Logs run stats to `pipeline.db` (SQLite) |
 
 ### Individual modules
@@ -202,8 +209,8 @@ Score Distribution:
 
 The LLM-as-judge scoring approach follows the **G-Eval** paradigm:
 
-1. **Generation phase** — GPT-4o-mini generates a concise 1–2 sentence answer given only the passage context.
-2. **Evaluation phase** — A separate judge prompt asks GPT-4o-mini to compare the generated answer against the reference answer and return a structured JSON score on three axes:
+1. **Generation phase** — Gemini 1.5 Flash generates a concise 1–2 sentence answer given only the passage context.
+2. **Evaluation phase** — A separate judge prompt asks Gemini to compare the generated answer against the reference answer and return a structured JSON score on three axes:
    - **Faithfulness** — Does the answer match the reference facts?
    - **Relevance** — Does the answer directly address the question?
    - **Completeness** — Does the answer cover the key information?
