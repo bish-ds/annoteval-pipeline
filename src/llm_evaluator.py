@@ -1,15 +1,18 @@
-﻿"""Generate LLM answers with OpenAI and score them with an LLM-as-judge pass.
+"""Generate LLM answers with Google Gemini and score them with an LLM-as-judge pass.
 
 Faithfulness measures whether the answer matches the reference facts.
 Relevance measures whether the answer directly addresses the question.
 Completeness measures whether the answer covers the key information needed.
+
+Uses the Google Gemini API (free tier) instead of OpenAI.
+Get a free API key at: https://aistudio.google.com
 """
 
 import json
 import os
 import time
 
-import openai
+import google.generativeai as genai
 import pandas as pd
 import dotenv
 
@@ -18,7 +21,7 @@ PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 DATA_DIR = os.path.join(PROJECT_ROOT, "data")
 RESPONSES_PATH = os.path.join(DATA_DIR, "llm_responses.csv")
 EVAL_SCORES_PATH = os.path.join(DATA_DIR, "llm_eval_scores.csv")
-MODEL_NAME = "gpt-4o-mini"
+MODEL_NAME = "gemini-1.5-flash"
 
 
 
@@ -31,14 +34,18 @@ def normalize_text(value: object) -> str:
 
 
 
-def load_environment_and_client() -> openai.OpenAI:
-    """Load environment variables from .env and initialize the OpenAI client."""
+def load_environment_and_model() -> genai.GenerativeModel:
+    """Load environment variables from .env and initialize the Gemini model."""
 
     dotenv.load_dotenv(os.path.join(PROJECT_ROOT, ".env"))
-    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    api_key = os.getenv("GEMINI_API_KEY", "").strip()
     if not api_key:
-        raise ValueError("OPENAI_API_KEY is missing. Update the .env file before running this script.")
-    return openai.OpenAI(api_key=api_key)
+        raise ValueError(
+            "GEMINI_API_KEY is missing. "
+            "Get a free key at https://aistudio.google.com and add it to the .env file."
+        )
+    genai.configure(api_key=api_key)
+    return genai.GenerativeModel(MODEL_NAME)
 
 
 
@@ -68,15 +75,15 @@ def build_generation_prompt(context: str, question: str) -> str:
 
 
 
-def request_model_text(client: openai.OpenAI, prompt: str) -> str:
-    """Send a prompt to the model and return the text output."""
+def request_model_text(model: genai.GenerativeModel, prompt: str) -> str:
+    """Send a prompt to the Gemini model and return the text output."""
 
-    response = client.responses.create(model=MODEL_NAME, input=prompt)
-    return response.output_text.strip()
+    response = model.generate_content(prompt)
+    return response.text.strip()
 
 
 
-def run_generation_phase(client: openai.OpenAI, llm_df: pd.DataFrame) -> pd.DataFrame:
+def run_generation_phase(model: genai.GenerativeModel, llm_df: pd.DataFrame) -> pd.DataFrame:
     """Generate concise answers for rows that still have placeholder values."""
 
     updated_df = llm_df.copy()
@@ -93,7 +100,7 @@ def run_generation_phase(client: openai.OpenAI, llm_df: pd.DataFrame) -> pd.Data
             normalize_text(updated_df.at[row_index, "question"]),
         )
         try:
-            generated_answer = request_model_text(client, prompt)
+            generated_answer = request_model_text(model, prompt)
             updated_df.at[row_index, "llm_answer"] = generated_answer or "GENERATION_FAILED"
             if generated_answer:
                 updated_df.at[row_index, "generated_at"] = pd.Timestamp.utcnow().isoformat()
@@ -105,7 +112,8 @@ def run_generation_phase(client: openai.OpenAI, llm_df: pd.DataFrame) -> pd.Data
         processed += 1
         if processed % 10 == 0:
             print(f"Generated {processed}/{total_rows} answers...")
-        time.sleep(0.3)
+        # Small delay to stay within free tier rate limits (15 RPM)
+        time.sleep(4)
 
     return updated_df
 
@@ -177,7 +185,7 @@ def safe_score(value: object) -> object:
 
 
 
-def evaluate_answers_with_judge(client: openai.OpenAI, llm_df: pd.DataFrame) -> pd.DataFrame:
+def evaluate_answers_with_judge(model: genai.GenerativeModel, llm_df: pd.DataFrame) -> pd.DataFrame:
     """Score generated answers for faithfulness, relevance, and completeness."""
 
     records = []
@@ -215,7 +223,7 @@ def evaluate_answers_with_judge(client: openai.OpenAI, llm_df: pd.DataFrame) -> 
 
         judge_prompt = build_judge_prompt(question, reference_answer, llm_answer)
         try:
-            judge_text = request_model_text(client, judge_prompt)
+            judge_text = request_model_text(model, judge_prompt)
             parsed_scores = parse_judge_scores(judge_text)
             record["faithfulness"] = safe_score(parsed_scores.get("faithfulness"))
             record["relevance"] = safe_score(parsed_scores.get("relevance"))
@@ -249,7 +257,8 @@ def evaluate_answers_with_judge(client: openai.OpenAI, llm_df: pd.DataFrame) -> 
         processed += 1
         if processed % 10 == 0:
             print(f"Evaluated {processed}/{total_evaluable} answers...")
-        time.sleep(0.3)
+        # Small delay to stay within free tier rate limits (15 RPM)
+        time.sleep(4)
 
     return pd.DataFrame(
         records,
@@ -320,19 +329,19 @@ def print_report(llm_df: pd.DataFrame, eval_df: pd.DataFrame) -> None:
 def main() -> None:
     """Run answer generation first, then evaluate the answers with an LLM judge."""
 
-    print("Loading environment and OpenAI client...")
-    client = load_environment_and_client()
+    print("Loading environment and initializing Gemini model...")
+    model = load_environment_and_model()
 
     print("Loading LLM response dataset...")
     llm_df = load_llm_responses(RESPONSES_PATH)
 
-    print("Starting Phase 1 - Generate LLM answers...")
-    llm_df = run_generation_phase(client, llm_df)
+    print("Starting Phase 1 - Generate LLM answers with Gemini...")
+    llm_df = run_generation_phase(model, llm_df)
     save_llm_responses(llm_df, RESPONSES_PATH)
     print(f"Saved updated LLM responses to {RESPONSES_PATH}")
 
-    print("Starting Phase 2 - LLM-as-judge evaluation...")
-    eval_df = evaluate_answers_with_judge(client, llm_df)
+    print("Starting Phase 2 - LLM-as-judge evaluation with Gemini...")
+    eval_df = evaluate_answers_with_judge(model, llm_df)
     save_eval_scores(eval_df, EVAL_SCORES_PATH)
     print(f"Saved LLM evaluation scores to {EVAL_SCORES_PATH}")
 
@@ -341,5 +350,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-
